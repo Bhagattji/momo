@@ -1,0 +1,17 @@
+.momo/
+*.key
+*.asc
+*.pem
+.env
+.env.local
+# Editor
+.vscode/
+.idea/
+*.log
+# Build artifacts
+dist/
+*.exe
+*.exe.sig
+*.deb
+*.rpm
+.DS_Store
