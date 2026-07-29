@@ -17,7 +17,7 @@ jobs:
           go-version: '1.24'
       - name: Install syft (SBOM)
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin 0.82.0
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v0.19.0
       - name: Generate SBOM
         run: |
           syft packages dir:. -o cyclonedx-json > sbom-cyclonedx.json || true
