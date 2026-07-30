@@ -41,18 +41,7 @@ release:
   draft: false
   prerelease: false
 
-signs:
-  - artifacts: checksums
-    args:
-      - --batch
-      - --yes
-      - --armor
-      - --detach-sign
-      - --default-key
-      - "{{.Env.GPG_FINGERPRINT}}"
-    env:
-      - GPG_FINGERPRINT
-
+# SBOM - v2 format
 sbom:
   artifacts: archives
 
@@ -79,6 +68,3 @@ nfpms:
       - deb
       - rpm
     bindir: /usr/local/bin
-    scripts:
-      postinstall: |
-        echo "momo installed successfully"
