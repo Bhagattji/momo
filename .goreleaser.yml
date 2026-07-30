@@ -1,5 +1,5 @@
-﻿version: 2
-project_name: momo
+﻿project_name: momo
+
 builds:
   - id: momo
     main: ./cmd
@@ -14,60 +14,70 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - "-s -w -X 'momo/internal/version.Version={{.Version}}'"
-    mod_timestamp: "2023-01-01T00:00:00Z"
+      - -s -w -X 'momo/internal/version.Version={{.Version}}'
+    mod_timestamp: '2023-01-01T00:00:00Z'
+
 archives:
   - format: tar.gz
+    name_template: '{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}'
     files:
       - LICENSE
       - README.md
-      - sbom-{{ .ProjectName }}.cyclonedx.json
-      - ./cmd/{{ .ProjectName }}
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: 'checksums.txt'
 
 snapshot:
-  name_template: "{{ .Tag }}-SNAPSHOT"
+  name_template: '{{.Tag}}-SNAPSHOT'
 
 release:
   github:
     owner: Bhagattji
     name: momo
+  draft: false
+  prerelease: false
 
 signs:
-  - artifacts: all
+  - artifacts: checksums
     args:
+      - --batch
+      - --yes
+      - --armor
       - --detach-sign
-    cmd: gpg
-
-dockers: []
+      - --default-key
+      - "{{.Env.GPG_FINGERPRINT}}"
+    env:
+      - GPG_FINGERPRINT
 
 sbom:
-  mode: file
-  file: sbom-cyclonedx.json
-  formats:
-    - cyclonedx
-
-nfpms:
-  - id: linux-deb
-    packager: deb
-    format: "deb"
-    name: momo
-    version: "{{ .Version }}"
-    maintainer: "Momo Maintainers <dev@example.com>"
-    description: "Momo CLI"
-    files:
-      - src: ./momo
-        dst: /usr/local/bin/momo
-  - id: linux-rpm
-    packager: rpm
-    format: "rpm"
-    name: momo
-    version: "{{ .Version }}"
-    maintainer: "Momo Maintainers <dev@example.com>"
-    description: "Momo CLI"
-    files:
-      - src: ./momo
-        dst: /usr/local/bin/momo
+  artifacts: archives
 
 changelog:
-  use: simple
-  body_template: "{{ range .Commits }}- {{ .Message | truncate 80 }}\n{{ end }}"
+  use: git
+  groups:
+    - title: Features
+      regexp: '^feat:'
+    - title: Bug Fixes
+      regexp: '^fix:'
+    - title: Chores
+      regexp: '^chore:'
+
+nfpms:
+  - id: momo-deb
+    file_name_template: '{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}'
+    package_name: momo
+    maintainer: Momo Maintainers <dev@example.com>
+    description: Momo CLI
+    vendor: Momo
+    homepage: https://github.com/Bhagattji/momo
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/local/bin
+    scripts:
+      postinstall: |
+        echo "momo installed successfully"
