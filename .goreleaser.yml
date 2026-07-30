@@ -1,4 +1,5 @@
-﻿project_name: momo
+﻿version: 2
+project_name: momo
 
 builds:
   - id: momo
