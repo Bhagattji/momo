@@ -1,3 +1,4 @@
+﻿version: 2
 project_name: momo
 builds:
   - id: momo
@@ -13,8 +14,8 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - "-s -w -X 'momo/internal/version.Version={{.Tag}}'"
-    mod_timestamp: "2023-01-01T00:00:00Z" # reproducible timestamp
+      - "-s -w -X 'momo/internal/version.Version={{.Version}}'"
+    mod_timestamp: "2023-01-01T00:00:00Z"
 archives:
   - format: tar.gz
     files:
@@ -32,7 +33,7 @@ release:
     name: momo
 
 signs:
-  - artifacts: true
+  - artifacts: all
     args:
       - --detach-sign
     cmd: gpg
@@ -45,7 +46,6 @@ sbom:
   formats:
     - cyclonedx
 
-# produce deb/rpm packages via nfpm
 nfpms:
   - id: linux-deb
     packager: deb
