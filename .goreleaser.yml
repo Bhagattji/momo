@@ -15,7 +15,8 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - "-s -w -X 'momo/internal/version.Version={{.Version}}'"
+      - -s -w
+      - -X momo/internal/version.Version={{.Version}}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
