@@ -20,21 +20,32 @@ type Model struct {
 
 // Message represents a chat message.
 type Message struct {
-	Role    string
-	Content string
+	Role       string     `json:"role"`              // "user", "assistant", "tool", "system"
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"` // assistant → model requests tools
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
 }
 
 // ToolCall represents a request from the model to call a tool.
 type ToolCall struct {
-	ID        string
-	Name      string
-	Arguments string
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // raw JSON string
+}
+
+// ToolDef describes a tool the model may call.
+type ToolDef struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"` // JSON Schema
 }
 
 // CompletionRequest is the provider request payload.
 type CompletionRequest struct {
 	Model    string
 	Messages []Message
+	Tools    []ToolDef
 	Stream   bool
 	System   string
 }
@@ -48,8 +59,9 @@ type CompletionResponse struct {
 
 // Chunk represents a streaming chunk.
 type Chunk struct {
-	Content string
-	Done    bool
+	Content   string
+	ToolCalls []ToolCall
+	Done      bool
 }
 
 // Usage holds token counts.

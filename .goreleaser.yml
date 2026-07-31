@@ -1,4 +1,4 @@
-﻿version: 2
+version: 2
 project_name: momo
 
 builds:
@@ -15,56 +15,55 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X 'momo/internal/version.Version={{.Version}}'
-    mod_timestamp: '2023-01-01T00:00:00Z'
+      - "-s -w -X 'momo/internal/version.Version={{.Version}}'"
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
-  - format: tar.gz
-    name_template: '{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}'
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     files:
       - LICENSE
       - README.md
-    format_overrides:
-      - goos: windows
-        format: zip
-
-checksum:
-  name_template: 'checksums.txt'
+      - scripts/install.sh
+      - scripts/install.ps1
 
 snapshot:
-  name_template: '{{.Tag}}-SNAPSHOT'
+  name_template: "{{ .Tag }}-SNAPSHOT"
 
 release:
   github:
     owner: Bhagattji
     name: momo
-  draft: false
-  prerelease: false
+  prerelease: auto
+  footer: |
+    ## Install
 
-# SBOM - v2 format
-sbom:
-  artifacts: archives
+    ### Windows (PowerShell)
+    ```powershell
+    irm https://raw.githubusercontent.com/Bhagattji/momo/main/scripts/install.ps1 | iex
+    ```
+
+    ### Linux / macOS
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/Bhagattji/momo/main/scripts/install.sh | bash
+    ```
+
+checksum:
+  name_template: "checksums.txt"
 
 changelog:
-  use: git
+  use: github
   groups:
     - title: Features
-      regexp: '^feat:'
-    - title: Bug Fixes
-      regexp: '^fix:'
-    - title: Chores
-      regexp: '^chore:'
-
-nfpms:
-  - id: momo-deb
-    file_name_template: '{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}'
-    package_name: momo
-    maintainer: Momo Maintainers <dev@example.com>
-    description: Momo CLI
-    vendor: Momo
-    homepage: https://github.com/Bhagattji/momo
-    license: MIT
-    formats:
-      - deb
-      - rpm
-    bindir: /usr/local/bin
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999

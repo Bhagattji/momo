@@ -37,7 +37,7 @@ func selfUpdateCmd(args []string) error {
 	if *source == "github" {
 		repo := os.Getenv("GITHUB_REPO")
 		if repo == "" {
-			repo = "ORG/momo"
+			repo = "Bhagattji/momo"
 		}
 		var metaURL string
 		if *version == "" {

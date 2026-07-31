@@ -15,3 +15,5 @@ dist/
 *.deb
 *.rpm
 .DS_Store
+# Nested garbage
+momo/momo/

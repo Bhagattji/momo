@@ -7,71 +7,23 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v4
+
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - name: Install deps
-        run: go mod download
-      - name: Vet & Test
-        run: |
-          go vet ./...
-          go test ./... -v
+
       - name: Build
-        run: go build -v ./...
+        run: go build -v ./cmd
 
-      - name: Generate SBOM (syft)
-        env:
-          SYFT_VERSION: "0.82.0"
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin $SYFT_VERSION
-          syft packages dir:. -o cyclonedx-json > sbom-cyclonedx.json || true
-          ls -la sbom-cyclonedx.json || true
+      - name: Vet
+        run: go vet ./...
 
-      - name: Sign binary (if GPG key present)
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' && secrets.GPG_PASSPHRASE != '' }}
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          echo "$GPG_PRIVATE_KEY" | base64 -d > private.key.gpg
-          gpg --batch --import private.key.gpg
-          # find built binary (example: momo.exe for windows build; here we sign any ./cmd output)
-          BIN=$(ls -1 $(pwd)/cmd | head -n1 || true)
-          # fallback: sign main build artifact if exists
-          if [ -f "./momo.exe" ]; then TARGET=./momo.exe; else TARGET=""; fi
-          if [ -z "$TARGET" ]; then echo "No target binary found to sign"; exit 0; fi
-          gpg --batch --yes --passphrase "$GPG_PASSPHRASE" --output "$TARGET.sig" --detach-sign "$TARGET"
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts
-          path: |
-            ./momo.exe
-            sbom-cyclonedx.json
-            ./momo.exe.sig
-
-      - name: govulncheck
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest || true
-          govulncheck ./... || true
-
-  tools-test:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.24'
-      - name: Install deps
-        run: go mod download
-      - name: Run tools package tests (Linux runner to avoid Windows App Control)
-        run: |
-          go test ./internal/tools -v
+      - name: Test
+        run: go test ./... -count=1 -timeout 120s

@@ -4,18 +4,17 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
-// Permission request/response structs used by executor -> tui.
 type PermissionRequest struct {
-	ID         string
-	Tool       string
-	Args       string
-	Message    string
-	SaveToProject bool // if true, remembering approval will be saved to project config
+	ID            string
+	Tool          string
+	Args          string
+	Message        string
+	SaveToProject bool
 }
 
 type PermissionResponse struct {
@@ -24,86 +23,209 @@ type PermissionResponse struct {
 	Remember bool
 }
 
-// Channels for communicating permission requests. Initialized when Start() runs.
-var PermissionRequests chan PermissionRequest
-var PermissionResponses chan PermissionResponse
-
-// Model is the BubbleTea model that can show a permission queue/dialog.
-type Model struct{
-	queue []PermissionRequest
-	showing bool
+type ChatMessage struct {
+	Role    string
+	Content string
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+var (
+	PermissionRequests chan PermissionRequest
+	PermissionResponses chan PermissionResponse
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	internalReqs  = make(chan PermissionRequest, 16)
+	internalResps = make(chan PermissionResponse, 16)
+	internalChat  = make(chan ChatMessage, 64)
+
+	started  bool
+)
+
+var (
+	styleHighlight = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	styleAsst       = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	styleTool      = lipgloss.NewStyle().Foreground(lipgloss.Color("183"))
+	styleErr       = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	styleDim       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	styleKey       = lipgloss.NewStyle().Foreground(lipgloss.Color("123")).Bold(true)
+	stylePermHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
+)
+
+type model struct {
+	chatHistory []ChatMessage
+	permQueue   []PermissionRequest
+	permActive  bool
+	width       int
+	height      int
+	quit        bool
+}
+
+func (m *model) Init() tea.Cmd { return nil }
+
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.KeyMsg:
-		if m.showing && len(m.queue) > 0 {
+		if m.permActive && len(m.permQueue) > 0 {
 			switch strings.ToLower(v.String()) {
 			case "y", "enter":
-				req := m.queue[0]
-				PermissionResponses <- PermissionResponse{ID: req.ID, Approved: true, Remember: false}
-				// pop
-				m.queue = m.queue[1:]
-				if len(m.queue) == 0 { m.showing = false }
+				r := m.permQueue[0]
+				internalResps <- PermissionResponse{ID: r.ID, Approved: true, Remember: false}
+				m.permQueue = m.permQueue[1:]
+				if len(m.permQueue) == 0 {
+					m.permActive = false
+				}
 			case "r":
-				req := m.queue[0]
-				PermissionResponses <- PermissionResponse{ID: req.ID, Approved: true, Remember: true}
-				m.queue = m.queue[1:]
-				if len(m.queue) == 0 { m.showing = false }
+				r := m.permQueue[0]
+				internalResps <- PermissionResponse{ID: r.ID, Approved: true, Remember: true}
+				m.permQueue = m.permQueue[1:]
+				if len(m.permQueue) == 0 {
+					m.permActive = false
+				}
 			case "n", "esc":
-				req := m.queue[0]
-				PermissionResponses <- PermissionResponse{ID: req.ID, Approved: false, Remember: false}
-				m.queue = m.queue[1:]
-				if len(m.queue) == 0 { m.showing = false }
+				r := m.permQueue[0]
+				internalResps <- PermissionResponse{ID: r.ID, Approved: false, Remember: false}
+				m.permQueue = m.permQueue[1:]
+				if len(m.permQueue) == 0 {
+					m.permActive = false
+				}
+			}
+		} else {
+			if v.String() == "ctrl+c" {
+				m.quit = true
+				return m, tea.Quit
 			}
 		}
+
+	case tea.WindowSizeMsg:
+		m.width = v.Width
+		m.height = v.Height
+
 	case PermissionRequest:
-		// append to queue and show dialog
-		r := v
-		m.queue = append(m.queue, r)
-		m.showing = true
+		m.permQueue = append(m.permQueue, v)
+		m.permActive = true
+
+	case ChatMessage:
+		m.chatHistory = append(m.chatHistory, v)
 	}
 	return m, nil
 }
 
-func (m Model) View() string {
-	if m.showing && len(m.queue) > 0 {
-		req := m.queue[0]
-		args := req.Args
-		if len(args) > 200 { args = args[:200] + "..." }
-		saveHint := ""
-		if req.SaveToProject {
-			saveHint = " (will be saved to project .momo/config.json)"
-		} else {
-			saveHint = " (will be saved to global config)"
-		}
-		return fmt.Sprintf("Permission required (%d queued)\n\nTool: %s\nMessage: %s\nArgs: %s\n\nApprove (y/enter)%s  Approve & remember (r)%s  Reject (n/esc)", len(m.queue), req.Tool, req.Message, args, saveHint, saveHint)
+func (m *model) View() string {
+	if m.quit {
+		return styleDim.Render("Goodbye.") + "\n"
 	}
-	return "momo TUI — placeholder\n\nPress Ctrl+C to quit."
+	if m.permActive && len(m.permQueue) > 0 {
+		return m.permView()
+	}
+	return m.chatView()
 }
 
-// Start runs the TUI program in the background and initializes permission channels.
-// Returns nil once the UI program is started; errors are logged to stderr.
-func Start() error {
-	PermissionRequests = make(chan PermissionRequest, 8)
-	PermissionResponses = make(chan PermissionResponse, 8)
+func (m *model) chatView() string {
+	var sb strings.Builder
+	sb.WriteString(styleHighlight.Render("momo"))
+	sb.WriteString(" ")
+	sb.WriteString(styleDim.Render("AI Coding Agent | ctrl+c to quit"))
+	sb.WriteString("\n\n")
 
-	p := tea.NewProgram(Model{})
-	// Bridge PermissionRequests into the program's message loop
+	if len(m.chatHistory) == 0 {
+		sb.WriteString(styleDim.Render("Ask me anything about your code..."))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	for _, msg := range m.chatHistory {
+		switch msg.Role {
+		case "assistant":
+			for _, line := range strings.Split(msg.Content, "\n") {
+				sb.WriteString(styleAsst.Render("  "))
+				sb.WriteString(line)
+				sb.WriteString("\n")
+			}
+		case "tool_output":
+			content := msg.Content
+			if len(content) > 150 {
+				content = content[:150] + "..."
+			}
+			sb.WriteString(styleTool.Render("  + "))
+			sb.WriteString(content)
+			sb.WriteString("\n")
+		case "tool":
+			sb.WriteString(styleTool.Render("  > "))
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n")
+		case "error":
+			sb.WriteString(styleErr.Render("  ! "))
+			sb.WriteString(msg.Content)
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
+func (m *model) permView() string {
+	var sb strings.Builder
+	req := m.permQueue[0]
+
+	sb.WriteString(stylePermHeader.Render("=== PERMISSION REQUIRED ==="))
+	sb.WriteString("\n")
+	if len(m.permQueue) > 1 {
+		sb.WriteString(fmt.Sprintf("  Pending: %d more in queue\n", len(m.permQueue)-1))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("  Tool:  %s\n", req.Tool))
+	if req.Args != "" {
+		args := req.Args
+		if len(args) > 120 {
+			args = args[:120] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("  Args:  %s\n", args))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(styleKey.Render("  y/enter"))
+	sb.WriteString(" = Approve   ")
+	sb.WriteString(styleKey.Render("r"))
+	sb.WriteString(" = Approve+Remember   ")
+	sb.WriteString(styleKey.Render("n/esc"))
+	sb.WriteString(" = Deny")
+	sb.WriteString("\n\n")
+
+	if req.SaveToProject {
+		sb.WriteString(styleDim.Render("  Remember saves to project .momo/config.json"))
+	} else {
+		sb.WriteString(styleDim.Render("  Remember saves to global config"))
+	}
+	return sb.String()
+}
+
+func init() {
+	PermissionRequests = internalReqs
+	PermissionResponses = internalResps
+}
+
+func Start() error {
+	if started {
+		return nil
+	}
+	started = true
+
+	m := &model{}
+
+	p := tea.NewProgram(m)
+
 	go func() {
-		for req := range PermissionRequests {
-			p.Send(req)
+		for {
+			select {
+			case req := <-internalReqs:
+				p.Send(req)
+			case msg := <-internalChat:
+				p.Send(msg)
+			}
 		}
 	}()
 
-	// Run the program (blocking). The bridge goroutine keeps feeding requests.
-	if err := p.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "failed to start TUI:", err)
-		return err
-	}
-	// Keep a short delay to let goroutine start
-	time.Sleep(50 * time.Millisecond)
+	go func() {
+		if err := p.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "tui error:", err)
+		}
+	}()
+
 	return nil
 }

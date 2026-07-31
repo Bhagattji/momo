@@ -6,22 +6,18 @@ import (
 	"path/filepath"
 )
 
-// Minimal config for initial scaffold.
 type Config struct {
-	DefaultProvider string            `json:"default_provider"`
-	DefaultModel    string            `json:"default_model"`
-	Approvals       map[string]bool   `json:"approvals,omitempty"` // tool -> approved
-	// Optional runtime fields (not recommended to store secrets here)
-	ProviderKey     string            `json:"provider_key,omitempty"`
-	ProviderBaseURL string            `json:"provider_base_url,omitempty"`
-	Workspace       string            `json:"workspace,omitempty"`
+	DefaultProvider string          `json:"default_provider"`
+	DefaultModel    string          `json:"default_model"`
+	Approvals       map[string]bool `json:"approvals,omitempty"`
+	ProviderKey     string          `json:"provider_key,omitempty"`
+	ProviderBaseURL string          `json:"provider_base_url,omitempty"`
+	Workspace       string          `json:"workspace,omitempty"`
 }
 
 func Load() (*Config, error) {
-	// Load global config then merge project-level approvals if present.
 	cfg := &Config{DefaultProvider: "groq", DefaultModel: "llama-3.3-70b-versatile", Approvals: map[string]bool{}}
 
-	// Load global
 	dir, err := os.UserConfigDir()
 	if err == nil {
 		appDir := filepath.Join(dir, "momo")
@@ -30,9 +26,10 @@ func Load() (*Config, error) {
 			_ = json.Unmarshal(b, cfg)
 		}
 	}
-	if cfg.Approvals == nil { cfg.Approvals = map[string]bool{} }
+	if cfg.Approvals == nil {
+		cfg.Approvals = map[string]bool{}
+	}
 
-	// Merge project-level config (walk up from cwd)
 	if wd, err := os.Getwd(); err == nil {
 		p := wd
 		for {
@@ -43,18 +40,38 @@ func Load() (*Config, error) {
 					for k, v := range pcfg.Approvals {
 						cfg.Approvals[k] = v
 					}
-					// merge non-sensitive runtime fields if present
-					if pcfg.ProviderBaseURL != "" { cfg.ProviderBaseURL = pcfg.ProviderBaseURL }
-					if pcfg.Workspace != "" { cfg.Workspace = pcfg.Workspace }
+					if pcfg.ProviderBaseURL != "" {
+						cfg.ProviderBaseURL = pcfg.ProviderBaseURL
+					}
+					if pcfg.Workspace != "" {
+						cfg.Workspace = pcfg.Workspace
+					}
 				}
 				break
 			}
 			parent := filepath.Dir(p)
-			if parent == p { break }
+			if parent == p {
+				break
+			}
 			p = parent
 		}
 	}
+
+	cfg.ResolveEnv()
+
 	return cfg, nil
+}
+
+func (c *Config) ResolveEnv() {
+	if v := os.Getenv("MOMO_WORKSPACE"); v != "" {
+		c.Workspace = v
+	}
+	if v := os.Getenv("MOMO_PROVIDER_BASE_URL"); v != "" {
+		c.ProviderBaseURL = v
+	}
+	if v := os.Getenv("MOMO_API_KEY"); v != "" {
+		c.ProviderKey = v
+	}
 }
 
 func Save(cfg *Config) error {
@@ -71,7 +88,6 @@ func Save(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	// Write file with restrictive permissions where supported.
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return err
 	}
@@ -79,9 +95,10 @@ func Save(cfg *Config) error {
 	return nil
 }
 
-// SaveProject persists a project-level config under workspace/.momo/config.json
 func SaveProject(cfg *Config, workspace string) error {
-	if workspace == "" { return Save(cfg) }
+	if workspace == "" {
+		return Save(cfg)
+	}
 	projDir := filepath.Join(workspace, ".momo")
 	if err := os.MkdirAll(projDir, 0o700); err != nil {
 		return err
@@ -95,4 +112,23 @@ func SaveProject(cfg *Config, workspace string) error {
 		return err
 	}
 	return nil
+}
+
+func Validate(cfg *Config) error {
+	if cfg.DefaultProvider == "" {
+		cfg.DefaultProvider = "groq"
+	}
+	if cfg.DefaultModel == "" {
+		cfg.DefaultModel = "llama-3.3-70b-versatile"
+	}
+	if cfg.ProviderBaseURL != "" {
+		if !hasValidScheme(cfg.ProviderBaseURL) {
+			cfg.ProviderBaseURL = ""
+		}
+	}
+	return nil
+}
+
+func hasValidScheme(url string) bool {
+	return len(url) > 4 && (url[:4] == "http" || url[:5] == "https")
 }

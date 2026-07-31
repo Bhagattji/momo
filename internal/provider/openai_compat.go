@@ -11,11 +11,30 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// OpenAICompat is a minimal compatible provider implementation that talks to
-// OpenAI-compatible endpoints (OpenAI, OpenRouter, Groq, etc.).
+var (
+	sharedClient     *http.Client
+	sharedClientOnce sync.Once
+)
+
+func getSharedClient() *http.Client {
+	sharedClientOnce.Do(func() {
+		transport := &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+		}
+		sharedClient = &http.Client{
+			Transport: transport,
+		}
+	})
+	return sharedClient
+}
+
 type OpenAICompat struct {
 	name    string
 	model   string
@@ -23,79 +42,147 @@ type OpenAICompat struct {
 	baseURL string
 }
 
-func (o *OpenAICompat) Name() string  { return o.name }
-func (o *OpenAICompat) Model() string { return o.model }
+func (o *OpenAICompat) Name() string    { return o.name }
+func (o *OpenAICompat) Model() string   { return o.model }
 func (o *OpenAICompat) SetModel(m string) { o.model = m }
 
-// doRequestWithRetry performs HTTP requests with simple exponential backoff,
-// honoring Retry-After header when present. Caller must close the response body.
-func doRequestWithRetry(ctx context.Context, client *http.Client, req *http.Request, maxAttempts int) (*http.Response, error) {
-	rand.Seed(time.Now().UnixNano())
-	if maxAttempts < 1 { maxAttempts = 1 }
+func doRequestWithRetry(ctx context.Context, req *http.Request, maxAttempts int) (*http.Response, error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		req.Body.Close()
+	}
+	client := getSharedClient()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Clone the request body if needed - for simplicity assume body is re-creatable by caller
+		if bodyBytes != nil {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
 		resp, err := client.Do(req)
 		if err != nil {
-			// network error - retry unless context done or last attempt
-			if ctx.Err() != nil { return nil, ctx.Err() }
-			if attempt == maxAttempts { return nil, err }
-			// backoff with jitter
-			sleep := time.Duration(1<<uint(attempt-1)) * time.Second
-			sleep += time.Duration(rand.Intn(500)) * time.Millisecond
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if attempt == maxAttempts {
+				return nil, err
+			}
+			sleep := time.Duration(1<<uint(attempt-1))*time.Second + time.Duration(rand.Intn(500))*time.Millisecond
 			select {
-			case <-ctx.Done(): return nil, ctx.Err()
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			case <-time.After(sleep):
 			}
 			continue
 		}
-
-		// If status suggests retry (rate limit or server error), handle Retry-After then retry
 		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			ra := resp.Header.Get("Retry-After")
 			_ = resp.Body.Close()
-			if attempt == maxAttempts { return nil, fmt.Errorf("provider error: %s", resp.Status) }
-			// parse Retry-After header
+			if attempt == maxAttempts {
+				return nil, fmt.Errorf("provider error: %s", resp.Status)
+			}
 			var wait time.Duration
-			if ra != "" {
-				if secs, err := strconv.Atoi(ra); err == nil {
-					wait = time.Duration(secs) * time.Second
-				} else if t, err := http.ParseTime(ra); err == nil {
-					wait = time.Until(t)
-				}
+			if secs, err := strconv.Atoi(ra); err == nil {
+				wait = time.Duration(secs) * time.Second
+			} else if t, err := http.ParseTime(ra); err == nil {
+				wait = time.Until(t)
 			}
 			if wait <= 0 {
 				wait = time.Duration(1<<uint(attempt-1)) * time.Second
 			}
 			wait += time.Duration(rand.Intn(500)) * time.Millisecond
 			select {
-			case <-ctx.Done(): return nil, ctx.Err()
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			case <-time.After(wait):
 			}
 			continue
 		}
-
 		return resp, nil
 	}
 	return nil, fmt.Errorf("exhausted retries")
 }
 
+type oaMessage struct {
+	Role       string       `json:"role"`
+	Content    string       `json:"content,omitempty"`
+	ToolCalls  []oaToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
+}
+
+type oaToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type oaTool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Parameters  map[string]any `json:"parameters"`
+	} `json:"function"`
+}
+
+func (o *OpenAICompat) buildMessages(req CompletionRequest) []oaMessage {
+	out := make([]oaMessage, 0, len(req.Messages)+1)
+	if req.System != "" {
+		out = append(out, oaMessage{Role: "system", Content: req.System})
+	}
+	for _, m := range req.Messages {
+		om := oaMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
+		for _, tc := range m.ToolCalls {
+			var c oaToolCall
+			c.ID = tc.ID
+			c.Type = "function"
+			c.Function.Name = tc.Name
+			c.Function.Arguments = tc.Arguments
+			om.ToolCalls = append(om.ToolCalls, c)
+		}
+		out = append(out, om)
+	}
+	return out
+}
+
+func (o *OpenAICompat) buildTools(req CompletionRequest) []oaTool {
+	if len(req.Tools) == 0 {
+		return nil
+	}
+	out := make([]oaTool, 0, len(req.Tools))
+	for _, t := range req.Tools {
+		var ot oaTool
+		ot.Type = "function"
+		ot.Function.Name = t.Name
+		ot.Function.Description = t.Description
+		ot.Function.Parameters = t.Parameters
+		out = append(out, ot)
+	}
+	return out
+}
+
 func (o *OpenAICompat) Chat(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
 	endpoint := o.baseURL
 	if endpoint == "" {
 		endpoint = "https://api.openai.com"
 	}
-	url := endpoint + "/v1/chat/completions"
+	url := strings.TrimRight(endpoint, "/") + "/chat/completions"
 
-	// Build payload
-	types := make([]map[string]string, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		types = append(types, map[string]string{"role": m.Role, "content": m.Content})
-	}
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"model":    o.model,
-		"messages": types,
-		"stream":   req.Stream,
+		"messages": o.buildMessages(req),
+		"stream":   false,
+	}
+	if tools := o.buildTools(req); tools != nil {
+		payload["tools"] = tools
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -107,11 +194,12 @@ func (o *OpenAICompat) Chat(ctx context.Context, req CompletionRequest) (*Comple
 		return nil, err
 	}
 	hreq.Header.Set("Content-Type", "application/json")
+	hreq.Header.Set("User-Agent", "momo/"+version())
 	if o.apiKey != "" {
 		hreq.Header.Set("Authorization", "Bearer "+o.apiKey)
 	}
 
-	resp, err := doRequestWithRetry(ctx, client, hreq, 5)
+	resp, err := doRequestWithRetry(ctx, hreq, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -119,58 +207,59 @@ func (o *OpenAICompat) Chat(ctx context.Context, req CompletionRequest) (*Comple
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("provider error: %s: %s", resp.Status, string(body))
+		return nil, fmt.Errorf("provider error: %s: %s", resp.Status, stripError(body))
 	}
 
 	var parsed struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string       `json:"content"`
+				ToolCalls []oaToolCall `json:"tool_calls"`
 			} `json:"message"`
-			Text string `json:"text"`
 		} `json:"choices"`
-		Usage map[string]interface{} `json:"usage"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
 	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		// If parsing fails, return raw body as content
 		return &CompletionResponse{Content: string(body)}, nil
 	}
 
-	content := ""
+	out := &CompletionResponse{}
+	out.Usage.InputTokens = parsed.Usage.PromptTokens
+	out.Usage.OutputTokens = parsed.Usage.CompletionTokens
+	out.Usage.TotalTokens = parsed.Usage.TotalTokens
 	if len(parsed.Choices) > 0 {
-		if parsed.Choices[0].Message.Content != "" {
-			content = parsed.Choices[0].Message.Content
-		} else {
-			content = parsed.Choices[0].Text
+		out.Content = parsed.Choices[0].Message.Content
+		for _, tc := range parsed.Choices[0].Message.ToolCalls {
+			out.ToolCalls = append(out.ToolCalls, ToolCall{
+				ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+			})
 		}
 	}
-
-	// Note: ToolCalls and Usage parsing omitted for now.
-	return &CompletionResponse{Content: content}, nil
+	return out, nil
 }
 
 func (o *OpenAICompat) Stream(ctx context.Context, req CompletionRequest, onChunk func(Chunk) error) error {
-	client := &http.Client{Timeout: 0}
 	endpoint := o.baseURL
 	if endpoint == "" {
 		endpoint = "https://api.openai.com"
 	}
-	url := endpoint + "/v1/chat/completions"
+	url := strings.TrimRight(endpoint, "/") + "/chat/completions"
 
-	// Build payload with stream=true
-	types := make([]map[string]string, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		types = append(types, map[string]string{"role": m.Role, "content": m.Content})
-	}
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"model":    o.model,
-		"messages": types,
+		"messages": o.buildMessages(req),
 		"stream":   true,
+	}
+	if tools := o.buildTools(req); tools != nil {
+		payload["tools"] = tools
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -182,11 +271,12 @@ func (o *OpenAICompat) Stream(ctx context.Context, req CompletionRequest, onChun
 		return err
 	}
 	hreq.Header.Set("Content-Type", "application/json")
+	hreq.Header.Set("User-Agent", "momo/v1")
 	if o.apiKey != "" {
 		hreq.Header.Set("Authorization", "Bearer "+o.apiKey)
 	}
 
-	resp, err := doRequestWithRetry(ctx, client, hreq, 5)
+	resp, err := doRequestWithRetry(ctx, hreq, 3)
 	if err != nil {
 		return err
 	}
@@ -194,78 +284,103 @@ func (o *OpenAICompat) Stream(ctx context.Context, req CompletionRequest, onChun
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("provider error: %s: %s", resp.Status, string(body))
+		return fmt.Errorf("provider error: %s: %s", resp.Status, stripError(body))
 	}
 
-	// Read SSE-like streaming lines. Each data: line may be a JSON chunk.
+	type accTool struct {
+		ID, Name, Args string
+	}
+	pending := map[int]*accTool{}
+
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if line == "" || line == "\n" {
+		if line == "" {
 			continue
 		}
-		// Expect lines like: data: {"id":..., "choices": [...]}
-		if strings.HasPrefix(line, "data:") {
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "[DONE]" {
-				// final
-				return nil
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			break
+		}
+		var chunkObj struct {
+			Choices []struct {
+				Delta struct {
+					Content   string       `json:"content"`
+					ToolCalls []oaToolCall `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunkObj); err != nil {
+			continue
+		}
+		if len(chunkObj.Choices) == 0 {
+			continue
+		}
+		delta := chunkObj.Choices[0].Delta
+		if delta.Content != "" {
+			if err := onChunk(Chunk{Content: delta.Content}); err != nil {
+				return err
 			}
-			var chunkObj map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &chunkObj); err != nil {
-				// ignore non-JSON keep-alive
-				continue
+		}
+		for i, tc := range delta.ToolCalls {
+			a := pending[i]
+			if a == nil {
+				a = &accTool{}
+				pending[i] = a
 			}
-			// Try to extract content from common fields
-			content := ""
-			if choices, ok := chunkObj["choices"].([]interface{}); ok && len(choices) > 0 {
-				if ch, ok := choices[0].(map[string]interface{}); ok {
-					// delta.content (OpenAI chunk) or message.content
-					if delta, ok := ch["delta"].(map[string]interface{}); ok {
-						if c, ok := delta["content"].(string); ok {
-							content = c
-						}
-					}
-					if content == "" {
-						if msg, ok := ch["message"].(map[string]interface{}); ok {
-							if c, ok := msg["content"].(string); ok { content = c }
-						}
-					}
-					if content == "" {
-						if text, ok := ch["text"].(string); ok { content = text }
-					}
-				}
+			if tc.ID != "" {
+				a.ID = tc.ID
 			}
-			if content != "" {
-				if err := onChunk(Chunk{Content: content}); err != nil {
-					return err
-				}
+			if tc.Function.Name != "" {
+				a.Name = tc.Function.Name
 			}
+			a.Args += tc.Function.Arguments
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+
+	if len(pending) > 0 {
+		var calls []ToolCall
+		for i := 0; i < len(pending); i++ {
+			if a := pending[i]; a != nil && a.Name != "" {
+				calls = append(calls, ToolCall{ID: a.ID, Name: a.Name, Arguments: a.Args})
+			}
+		}
+		if len(calls) > 0 {
+			if err := onChunk(Chunk{ToolCalls: calls, Done: true}); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
 func (o *OpenAICompat) ListModels(ctx context.Context) ([]Model, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+	if ctx == nil {
+		return []Model{{ID: o.model, Owner: o.name}}, fmt.Errorf("nil context")
+	}
 	endpoint := o.baseURL
 	if endpoint == "" {
 		endpoint = "https://api.openai.com"
 	}
-	url := endpoint + "/v1/models"
+	url := strings.TrimRight(endpoint, "/") + "/models"
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "momo/v1")
 	if o.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+o.apiKey)
 	}
+	client := getSharedClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		// fallback to single default model
 		return []Model{{ID: o.model, Owner: o.name}}, nil
 	}
 	defer resp.Body.Close()
@@ -273,9 +388,11 @@ func (o *OpenAICompat) ListModels(ctx context.Context) ([]Model, error) {
 		return []Model{{ID: o.model, Owner: o.name}}, nil
 	}
 	var out struct {
-		Data []struct{ ID string `json:"id"` } `json:"data"`
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err := json.Unmarshal(body, &out); err != nil || len(out.Data) == 0 {
 		return []Model{{ID: o.model, Owner: o.name}}, nil
 	}
@@ -284,4 +401,15 @@ func (o *OpenAICompat) ListModels(ctx context.Context) ([]Model, error) {
 		models = append(models, Model{ID: m.ID, Owner: o.name})
 	}
 	return models, nil
+}
+
+func stripError(b []byte) string {
+	if len(b) > 1024 {
+		return string(b[:1024])
+	}
+	return string(b)
+}
+
+func version() string {
+	return "1.0.0"
 }
