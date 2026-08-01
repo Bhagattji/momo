@@ -102,7 +102,7 @@ func ApplyPatch(patch string) (ToolResult, error) {
 		if dir == "." { dir = "" }
 		absDir := cwdAbs
 		if dir != "" {
-			absDirTmp, err := filepath.Abs(filepath.Join(cwd, dir))
+			absDirTmp, err := filepathAbsSafe(filepath.Join(cwd, dir))
 			if err != nil { return ToolResult{IsError: true, Output: err.Error()}, err }
 			absDir = absDirTmp
 			if !strings.HasPrefix(absDir+string(os.PathSeparator), cwdAbs) {
@@ -204,4 +204,12 @@ func ApplyPatch(patch string) (ToolResult, error) {
 	}
 
 	return ToolResult{Title: "apply_patch", Output: strings.Join(results, "\n"), IsError: false}, nil
+}
+
+func filepathAbsSafe(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		resolved = path
+	}
+	return filepath.Abs(resolved)
 }
