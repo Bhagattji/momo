@@ -23,7 +23,7 @@ type Info struct {
 func Catalog() []Info {
 	return []Info{
 		// Tier 1 — free + fast
-		{Name: "groq", Env: "GROQ_API_KEY", DefaultBase: "https://api.groq.com/openai", DefaultModel: "llama-3.3-70b-versatile", Notes: "Ultra-fast (free tier)", Auth: AuthAPIKey, Free: true},
+		{Name: "groq", Env: "GROQ_API_KEY", DefaultBase: "https://api.groq.com/openai/v1", DefaultModel: "llama-3.3-70b-versatile", Notes: "Ultra-fast (free tier)", Auth: AuthAPIKey, Free: true},
 		{Name: "cerebras", Env: "CEREBRAS_API_KEY", DefaultBase: "https://api.cerebras.ai/v1", DefaultModel: "llama3.1-70b", Notes: "Ultra-fast silicon (free)", Auth: AuthAPIKey, Free: true},
 		{Name: "google", Env: "GOOGLE_API_KEY", DefaultBase: "https://generativelanguage.googleapis.com/v1beta", DefaultModel: "gemini-2.0-flash", Notes: "Gemini Flash (free)", Auth: AuthAPIKey, Free: true},
 
