@@ -27,8 +27,8 @@ var (
 
 func Init(debug bool) {
 	mu.Lock()
-	defer mu.Unlock()
 	if enabled {
+		mu.Unlock()
 		return
 	}
 	enabled = true
@@ -46,7 +46,9 @@ func Init(debug bool) {
 		}
 	}
 	logger = log.New(w, "", 0)
-	Info("logging initialized (level=%s)", levelString())
+	lvl := levelString()
+	mu.Unlock()
+	logAtUnsafe(LevelInfo, "INFO", "logging initialized (level=%s)", lvl)
 }
 
 func Debug(format string, args ...any) {
@@ -68,6 +70,10 @@ func Error(format string, args ...any) {
 func logAt(lvl Level, tag string, format string, args ...any) {
 	mu.Lock()
 	defer mu.Unlock()
+	logAtUnsafe(lvl, tag, format, args...)
+}
+
+func logAtUnsafe(lvl Level, tag string, format string, args ...any) {
 	if !enabled || lvl < curLevel || logger == nil {
 		return
 	}
